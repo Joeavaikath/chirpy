@@ -49,8 +49,8 @@ func main() {
 	serveMux.Handle("GET /admin/metrics", http.HandlerFunc(apiConfig.printMetric))
 	serveMux.Handle("POST /admin/reset", http.HandlerFunc(apiConfig.resetMetric))
 
-	serveMux.Handle("POST /api/validate_chirp", http.HandlerFunc(validateChirp))
 	serveMux.Handle("POST /api/users", http.HandlerFunc(apiConfig.createUser))
+	serveMux.Handle("POST /api/chirps", http.HandlerFunc(apiConfig.addChirp))
 
 	server := http.Server{
 		Addr:    ":8080",
@@ -84,8 +84,12 @@ func (cfg *apiConfig) resetMetric(w http.ResponseWriter, r *http.Request) {
 	if os.Getenv("PLATFORM") != "dev" {
 		invalid := invalidChirp{}
 		respondWithError(w, 403, invalid)
+		return
 	}
-	cfg.dbQueries.DropUsers(r.Context())
+	err := cfg.dbQueries.DropUsers(r.Context())
+	if somethingWentWrongCheck(err, w) {
+		return
+	}
 }
 
 type chirp struct {
@@ -108,11 +112,24 @@ type emailRequest struct {
 	Email string `json:"email"`
 }
 
+type createChirpRequest struct {
+	Body   string `json:"body"`
+	UserID string `json:"user_id"`
+}
+
 type User struct {
 	ID        uuid.UUID `json:"id"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 	Email     string    `json:"email"`
+}
+
+type Chirp struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Body      string    `json:"body"`
+	UserID    uuid.UUID `json:"user_id"`
 }
 
 func validateChirp(w http.ResponseWriter, r *http.Request) {
@@ -123,11 +140,7 @@ func validateChirp(w http.ResponseWriter, r *http.Request) {
 	params := chirp{}
 	err := decoder.Decode(&params)
 
-	if err != nil {
-		invalid := invalidChirp{
-			Error: "Something went wrong",
-		}
-		respondWithError(w, 500, invalid)
+	if somethingWentWrongCheck(err, w) {
 		return
 	}
 
@@ -147,6 +160,7 @@ func validateChirp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondWithJSON(w, 200, cleanChirp)
+	return
 }
 
 func replaceProfane(message string, profaneList []string) string {
@@ -185,28 +199,66 @@ func sliceContains[T comparable](slice []T, item T) bool {
 
 func (cfg *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
 	params, err := decodeJSON[emailRequest](r)
-	if err != nil {
-		invalid := invalidChirp{
-			Error: "Something went wrong",
-		}
-		respondWithError(w, 500, invalid)
+	if somethingWentWrongCheck(err, w) {
+		return
 	}
-	user, err := cfg.dbQueries.CreateUser(r.Context(), params.Email)
 
-	if err != nil {
-		invalid := invalidChirp{
-			Error: "Something went wrong",
-		}
-		respondWithError(w, 500, invalid)
+	user, err := cfg.dbQueries.CreateUser(r.Context(), params.Email)
+	if somethingWentWrongCheck(err, w) {
+		return
 	}
-	userResponse := User{
+
+	userCreatedResponse := User{
 		ID:        user.ID,
 		CreatedAt: user.CreatedAt,
 		UpdatedAt: user.UpdatedAt,
 		Email:     params.Email,
 	}
 
-	respondWithJSON(w, 201, userResponse)
+	respondWithJSON(w, 201, userCreatedResponse)
+}
+
+func (cfg *apiConfig) addChirp(w http.ResponseWriter, r *http.Request) {
+	params, err := decodeJSON[createChirpRequest](r)
+	if somethingWentWrongCheck(err, w) {
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+
+	if len(params.Body) > 140 {
+		respondWithError(w, 400, invalidChirp{
+			Error: "Chirp is too long",
+		})
+		return
+	}
+
+	profaneList := []string{"kerfuffle", "sharbert", "fornax"}
+	cleanedBody := replaceProfane(params.Body, profaneList)
+	user_id, err := uuid.Parse(params.UserID)
+	if somethingWentWrongCheck(err, w) {
+		return
+	}
+
+	createChirpParams := database.CreateChirpParams{
+		Body:   cleanedBody,
+		UserID: user_id,
+	}
+
+	chirp, err := cfg.dbQueries.CreateChirp(r.Context(), createChirpParams)
+	if somethingWentWrongCheck(err, w) {
+		return
+	}
+
+	chirpCreatedResponse := Chirp{
+		ID:        chirp.ID,
+		CreatedAt: chirp.CreatedAt,
+		UpdatedAt: chirp.UpdatedAt,
+		Body:      chirp.Body,
+		UserID:    chirp.UserID,
+	}
+
+	respondWithJSON(w, 201, chirpCreatedResponse)
 
 }
 
@@ -215,4 +267,14 @@ func decodeJSON[T any](r *http.Request) (T, error) {
 	decoder := json.NewDecoder(r.Body)
 	err := decoder.Decode(&result)
 	return result, err
+}
+
+func somethingWentWrongCheck(err error, w http.ResponseWriter) bool {
+	if err != nil {
+		respondWithError(w, 500, invalidChirp{
+			Error: "Something went wrong",
+		})
+		return true
+	}
+	return false
 }
