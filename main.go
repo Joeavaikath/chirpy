@@ -1,6 +1,7 @@
 package main
 
 import (
+	"chirpy/internal/auth"
 	"chirpy/internal/database"
 	"database/sql"
 	"encoding/json"
@@ -49,10 +50,11 @@ func main() {
 	serveMux.Handle("GET /admin/metrics", http.HandlerFunc(apiConfig.printMetric))
 	serveMux.Handle("POST /admin/reset", http.HandlerFunc(apiConfig.resetMetric))
 
-	serveMux.Handle("POST /api/users", http.HandlerFunc(apiConfig.createUser))
+	serveMux.Handle("POST /api/users", http.HandlerFunc(apiConfig.addUser))
 	serveMux.Handle("GET /api/chirps", http.HandlerFunc(apiConfig.getAllChirps))
 	serveMux.Handle("GET /api/chirps/{chirpID}", http.HandlerFunc(apiConfig.getChirp))
 	serveMux.Handle("POST /api/chirps", http.HandlerFunc(apiConfig.addChirp))
+	serveMux.Handle("POST /api/login", http.HandlerFunc(apiConfig.login))
 
 	server := http.Server{
 		Addr:    ":8080",
@@ -110,8 +112,9 @@ type invalidChirp struct {
 	Error string `json:"error"`
 }
 
-type emailRequest struct {
-	Email string `json:"email"`
+type createUserRequest struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
 }
 
 type createChirpRequest struct {
@@ -199,13 +202,22 @@ func sliceContains[T comparable](slice []T, item T) bool {
 	return false
 }
 
-func (cfg *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
-	params, err := decodeJSON[emailRequest](r)
+func (cfg *apiConfig) addUser(w http.ResponseWriter, r *http.Request) {
+	params, err := decodeJSON[createUserRequest](r)
+	if somethingWentWrongCheck(err, w) {
+		return
+	}
+	hashed_password, err := auth.HashPassword(params.Password)
 	if somethingWentWrongCheck(err, w) {
 		return
 	}
 
-	user, err := cfg.dbQueries.CreateUser(r.Context(), params.Email)
+	createUserParams := database.CreateUserParams{
+		Email:          params.Email,
+		HashedPassword: hashed_password,
+	}
+
+	user, err := cfg.dbQueries.CreateUser(r.Context(), createUserParams)
 	if somethingWentWrongCheck(err, w) {
 		return
 	}
@@ -306,6 +318,38 @@ func (cfg *apiConfig) getChirp(w http.ResponseWriter, r *http.Request) {
 		UserID:    chirp.UserID,
 	}
 	respondWithJSON(w, 200, responseChirp)
+
+}
+
+func (cfg *apiConfig) login(w http.ResponseWriter, r *http.Request) {
+	params, err := decodeJSON[createUserRequest](r)
+	if somethingWentWrongCheck(err, w) {
+		return
+	}
+	searchedUser, err := cfg.dbQueries.GetUserByEmail(r.Context(), params.Email)
+	if err != nil {
+		respondWithError(w, 401, struct {
+			Error string `json:"error"`
+		}{Error: "Incorrect email or password"})
+		return
+	}
+
+	if auth.CheckPasswordHash(searchedUser.HashedPassword, params.Password) == nil {
+
+		userLoginResponse := User{
+			ID:        searchedUser.ID,
+			CreatedAt: searchedUser.CreatedAt,
+			UpdatedAt: searchedUser.UpdatedAt,
+			Email:     searchedUser.Email,
+		}
+
+		respondWithJSON(w, 200, userLoginResponse)
+	} else {
+		respondWithError(w, 401, struct {
+			Error string `json:"error"`
+		}{Error: "Incorrect email or password"})
+		return
+	}
 
 }
 
