@@ -20,6 +20,7 @@ import (
 type apiConfig struct {
 	fileserverHits atomic.Int32
 	dbQueries      *database.Queries
+	jwtSecret      string
 }
 
 func main() {
@@ -27,6 +28,7 @@ func main() {
 	godotenv.Load()
 
 	dbURL := os.Getenv("DB_URL")
+	jwtSecret := os.Getenv("SECRET")
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
 		os.Exit(1)
@@ -38,6 +40,7 @@ func main() {
 
 	apiConfig := &apiConfig{
 		dbQueries: dbQueries,
+		jwtSecret: jwtSecret,
 	}
 
 	serveMux.Handle("/app/", apiConfig.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(".")))))
@@ -96,18 +99,6 @@ func (cfg *apiConfig) resetMetric(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-type chirp struct {
-	Body string `json:"body"`
-}
-
-type validChirp struct {
-	Valid bool `json:"valid"`
-}
-
-type cleanedChirp struct {
-	CleanChirp string `json:"cleaned_body"`
-}
-
 type invalidChirp struct {
 	Error string `json:"error"`
 }
@@ -122,63 +113,12 @@ type createChirpRequest struct {
 	UserID string `json:"user_id"`
 }
 
-type User struct {
-	ID        uuid.UUID `json:"id"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Email     string    `json:"email"`
-}
-
 type Chirp struct {
 	ID        uuid.UUID `json:"id"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 	Body      string    `json:"body"`
 	UserID    uuid.UUID `json:"user_id"`
-}
-
-func validateChirp(w http.ResponseWriter, r *http.Request) {
-
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-
-	decoder := json.NewDecoder(r.Body)
-	params := chirp{}
-	err := decoder.Decode(&params)
-
-	if somethingWentWrongCheck(err, w) {
-		return
-	}
-
-	if len(params.Body) > 140 {
-		invalid := invalidChirp{
-			Error: "Chirp is too long",
-		}
-		respondWithError(w, 400, invalid)
-		return
-	}
-
-	profaneList := []string{"kerfuffle", "sharbert", "fornax"}
-	cleanedBody := replaceProfane(params.Body, profaneList)
-
-	cleanChirp := cleanedChirp{
-		CleanChirp: cleanedBody,
-	}
-
-	respondWithJSON(w, 200, cleanChirp)
-	return
-}
-
-func replaceProfane(message string, profaneList []string) string {
-	words := strings.Split(message, " ")
-	cleanedWords := []string{}
-	for _, word := range words {
-		if sliceContains(profaneList, strings.ToLower(word)) {
-			cleanedWords = append(cleanedWords, "****")
-		} else {
-			cleanedWords = append(cleanedWords, word)
-		}
-	}
-	return strings.Join(cleanedWords, " ")
 }
 
 func respondWithError(w http.ResponseWriter, code int, errorPayload interface{}) {
@@ -222,6 +162,13 @@ func (cfg *apiConfig) addUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	type User struct {
+		ID        uuid.UUID `json:"id"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+		Email     string    `json:"email"`
+	}
+
 	userCreatedResponse := User{
 		ID:        user.ID,
 		CreatedAt: user.CreatedAt,
@@ -238,6 +185,23 @@ func (cfg *apiConfig) addChirp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check if user has a valid JWT
+	token, err := auth.GetBearerToken(r.Header)
+	if somethingWentWrongCheck(err, w) {
+		return
+	}
+
+	userID, err := auth.ValidateJWT(token, cfg.jwtSecret)
+	if somethingWentWrongCheck(err, w) {
+		return
+	}
+
+	if userID == uuid.Nil {
+		respondWithError(w, 401, struct {
+			Error string `json:"error"`
+		}{Error: "Unauthorized"})
+	}
+
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 
 	if len(params.Body) > 140 {
@@ -249,14 +213,13 @@ func (cfg *apiConfig) addChirp(w http.ResponseWriter, r *http.Request) {
 
 	profaneList := []string{"kerfuffle", "sharbert", "fornax"}
 	cleanedBody := replaceProfane(params.Body, profaneList)
-	user_id, err := uuid.Parse(params.UserID)
 	if somethingWentWrongCheck(err, w) {
 		return
 	}
 
 	createChirpParams := database.CreateChirpParams{
 		Body:   cleanedBody,
-		UserID: user_id,
+		UserID: userID,
 	}
 
 	chirp, err := cfg.dbQueries.CreateChirp(r.Context(), createChirpParams)
@@ -322,10 +285,21 @@ func (cfg *apiConfig) getChirp(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) login(w http.ResponseWriter, r *http.Request) {
-	params, err := decodeJSON[createUserRequest](r)
+	type loginRequest struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+		Expiry   int    `json:"expiry_in_seconds"`
+	}
+	params, err := decodeJSON[loginRequest](r)
 	if somethingWentWrongCheck(err, w) {
 		return
 	}
+
+	// If 0 value or above threshold
+	if params.Expiry == 0 || params.Expiry > 3600 {
+		params.Expiry = 3600
+	}
+
 	searchedUser, err := cfg.dbQueries.GetUserByEmail(r.Context(), params.Email)
 	if err != nil {
 		respondWithError(w, 401, struct {
@@ -334,23 +308,50 @@ func (cfg *apiConfig) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if auth.CheckPasswordHash(searchedUser.HashedPassword, params.Password) == nil {
+	if auth.CheckPasswordHash(searchedUser.HashedPassword, params.Password) != nil {
 
-		userLoginResponse := User{
-			ID:        searchedUser.ID,
-			CreatedAt: searchedUser.CreatedAt,
-			UpdatedAt: searchedUser.UpdatedAt,
-			Email:     searchedUser.Email,
-		}
-
-		respondWithJSON(w, 200, userLoginResponse)
-	} else {
 		respondWithError(w, 401, struct {
 			Error string `json:"error"`
 		}{Error: "Incorrect email or password"})
 		return
 	}
 
+	// All okay, generate the token
+	token, err := auth.MakeJWT(searchedUser.ID, cfg.jwtSecret, time.Duration(params.Expiry)*time.Second)
+	if somethingWentWrongCheck(err, w) {
+		return
+	}
+
+	type User struct {
+		ID        uuid.UUID `json:"id"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+		Email     string    `json:"email"`
+		Token     string    `json:"token"`
+	}
+
+	userLoginResponse := User{
+		ID:        searchedUser.ID,
+		CreatedAt: searchedUser.CreatedAt,
+		UpdatedAt: searchedUser.UpdatedAt,
+		Email:     searchedUser.Email,
+		Token:     token,
+	}
+	respondWithJSON(w, 200, userLoginResponse)
+
+}
+
+func replaceProfane(message string, profaneList []string) string {
+	words := strings.Split(message, " ")
+	cleanedWords := []string{}
+	for _, word := range words {
+		if sliceContains(profaneList, strings.ToLower(word)) {
+			cleanedWords = append(cleanedWords, "****")
+		} else {
+			cleanedWords = append(cleanedWords, word)
+		}
+	}
+	return strings.Join(cleanedWords, " ")
 }
 
 func decodeJSON[T any](r *http.Request) (T, error) {
@@ -362,9 +363,7 @@ func decodeJSON[T any](r *http.Request) (T, error) {
 
 func somethingWentWrongCheck(err error, w http.ResponseWriter) bool {
 	if err != nil {
-		respondWithError(w, 500, invalidChirp{
-			Error: "Something went wrong",
-		})
+		respondWithError(w, 500, error.Error(err))
 		return true
 	}
 	return false
