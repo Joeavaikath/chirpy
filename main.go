@@ -63,6 +63,8 @@ func main() {
 
 	serveMux.Handle("PUT /api/users", http.HandlerFunc(apiConfig.updateUser))
 
+	serveMux.Handle("DELETE /api/chirps/{chirpID}", http.HandlerFunc(apiConfig.deleteChirp))
+
 	server := http.Server{
 		Addr:    ":8080",
 		Handler: serveMux,
@@ -418,9 +420,7 @@ func (cfg *apiConfig) updateUser(w http.ResponseWriter, r *http.Request) {
 
 	userID, err := auth.ValidateJWT(accessToken, cfg.jwtSecret)
 	if err != nil {
-		respondWithError(w, 401, struct {
-			Error string `json:"error"`
-		}{Error: "Invalid access token"})
+		respondWithError(w, http.StatusUnauthorized, err.Error())
 		return
 	}
 
@@ -469,6 +469,55 @@ func (cfg *apiConfig) updateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondWithJSON(w, 200, userResponse)
+
+}
+
+func (cfg *apiConfig) deleteChirp(w http.ResponseWriter, r *http.Request) {
+	chirpID := r.PathValue("chirpID")
+	chirpUUID, err := uuid.Parse(chirpID)
+	if errorNotNil(err, w) {
+		return
+	}
+
+	chirp, err := cfg.dbQueries.GetChirpById(r.Context(), chirpUUID)
+	if errorNotNil(err, w) {
+		return
+	}
+
+	accessToken, err := auth.GetBearerToken(r.Header)
+	if accessToken == "" {
+		respondWithError(w, 401, struct {
+			Error string `json:"error"`
+		}{Error: "Invalid access token"})
+		return
+	}
+
+	if errorNotNil(err, w) {
+		return
+	}
+
+	userID, err := auth.ValidateJWT(accessToken, cfg.jwtSecret)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+
+	if userID != chirp.UserID {
+		respondWithError(w, http.StatusForbidden, struct {
+			Error string `json:"error"`
+		}{Error: "user does not own chirp"})
+		return
+	}
+
+	err = cfg.dbQueries.DeleteChirpById(r.Context(), chirpUUID)
+	if err != nil {
+		respondWithError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	respondWithJSON(w, http.StatusNoContent, struct {
+		Error string `json:"error"`
+	}{Error: "delete successful"})
 
 }
 
