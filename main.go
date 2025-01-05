@@ -58,6 +58,8 @@ func main() {
 	serveMux.Handle("GET /api/chirps/{chirpID}", http.HandlerFunc(apiConfig.getChirp))
 	serveMux.Handle("POST /api/chirps", http.HandlerFunc(apiConfig.addChirp))
 	serveMux.Handle("POST /api/login", http.HandlerFunc(apiConfig.login))
+	serveMux.Handle("POST /api/refresh", http.HandlerFunc(apiConfig.refresh))
+	serveMux.Handle("POST /api/revoke", http.HandlerFunc(apiConfig.revoke))
 
 	server := http.Server{
 		Addr:    ":8080",
@@ -94,7 +96,7 @@ func (cfg *apiConfig) resetMetric(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err := cfg.dbQueries.DropUsers(r.Context())
-	if somethingWentWrongCheck(err, w) {
+	if errorNotNil(err, w) {
 		return
 	}
 }
@@ -144,11 +146,11 @@ func sliceContains[T comparable](slice []T, item T) bool {
 
 func (cfg *apiConfig) addUser(w http.ResponseWriter, r *http.Request) {
 	params, err := decodeJSON[createUserRequest](r)
-	if somethingWentWrongCheck(err, w) {
+	if errorNotNil(err, w) {
 		return
 	}
 	hashed_password, err := auth.HashPassword(params.Password)
-	if somethingWentWrongCheck(err, w) {
+	if errorNotNil(err, w) {
 		return
 	}
 
@@ -158,7 +160,7 @@ func (cfg *apiConfig) addUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	user, err := cfg.dbQueries.CreateUser(r.Context(), createUserParams)
-	if somethingWentWrongCheck(err, w) {
+	if errorNotNil(err, w) {
 		return
 	}
 
@@ -181,18 +183,21 @@ func (cfg *apiConfig) addUser(w http.ResponseWriter, r *http.Request) {
 
 func (cfg *apiConfig) addChirp(w http.ResponseWriter, r *http.Request) {
 	params, err := decodeJSON[createChirpRequest](r)
-	if somethingWentWrongCheck(err, w) {
+	if errorNotNil(err, w) {
 		return
 	}
 
 	// Check if user has a valid JWT
 	token, err := auth.GetBearerToken(r.Header)
-	if somethingWentWrongCheck(err, w) {
+	if errorNotNil(err, w) {
 		return
 	}
 
 	userID, err := auth.ValidateJWT(token, cfg.jwtSecret)
-	if somethingWentWrongCheck(err, w) {
+	if err != nil {
+		respondWithError(w, 401, struct {
+			Error string `json:"error"`
+		}{Error: err.Error()})
 		return
 	}
 
@@ -200,6 +205,7 @@ func (cfg *apiConfig) addChirp(w http.ResponseWriter, r *http.Request) {
 		respondWithError(w, 401, struct {
 			Error string `json:"error"`
 		}{Error: "Unauthorized"})
+		return
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -213,7 +219,7 @@ func (cfg *apiConfig) addChirp(w http.ResponseWriter, r *http.Request) {
 
 	profaneList := []string{"kerfuffle", "sharbert", "fornax"}
 	cleanedBody := replaceProfane(params.Body, profaneList)
-	if somethingWentWrongCheck(err, w) {
+	if errorNotNil(err, w) {
 		return
 	}
 
@@ -223,7 +229,7 @@ func (cfg *apiConfig) addChirp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	chirp, err := cfg.dbQueries.CreateChirp(r.Context(), createChirpParams)
-	if somethingWentWrongCheck(err, w) {
+	if errorNotNil(err, w) {
 		return
 	}
 
@@ -241,7 +247,7 @@ func (cfg *apiConfig) addChirp(w http.ResponseWriter, r *http.Request) {
 
 func (cfg *apiConfig) getAllChirps(w http.ResponseWriter, r *http.Request) {
 	chirps, err := cfg.dbQueries.GetAllChirps(r.Context())
-	if somethingWentWrongCheck(err, w) {
+	if errorNotNil(err, w) {
 		return
 	}
 	responseChirps := []Chirp{}
@@ -261,7 +267,7 @@ func (cfg *apiConfig) getAllChirps(w http.ResponseWriter, r *http.Request) {
 func (cfg *apiConfig) getChirp(w http.ResponseWriter, r *http.Request) {
 	chirpID := r.PathValue("chirpID")
 	chirpUUID, err := uuid.Parse(chirpID)
-	if somethingWentWrongCheck(err, w) {
+	if errorNotNil(err, w) {
 		return
 	}
 	chirp, err := cfg.dbQueries.GetChirpById(r.Context(), chirpUUID)
@@ -288,16 +294,10 @@ func (cfg *apiConfig) login(w http.ResponseWriter, r *http.Request) {
 	type loginRequest struct {
 		Email    string `json:"email"`
 		Password string `json:"password"`
-		Expiry   int    `json:"expiry_in_seconds"`
 	}
 	params, err := decodeJSON[loginRequest](r)
-	if somethingWentWrongCheck(err, w) {
+	if errorNotNil(err, w) {
 		return
-	}
-
-	// If 0 value or above threshold
-	if params.Expiry == 0 || params.Expiry > 3600 {
-		params.Expiry = 3600
 	}
 
 	searchedUser, err := cfg.dbQueries.GetUserByEmail(r.Context(), params.Email)
@@ -317,27 +317,95 @@ func (cfg *apiConfig) login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// All okay, generate the token
-	token, err := auth.MakeJWT(searchedUser.ID, cfg.jwtSecret, time.Duration(params.Expiry)*time.Second)
-	if somethingWentWrongCheck(err, w) {
+	token, err := auth.MakeJWT(searchedUser.ID, cfg.jwtSecret, time.Duration(1)*time.Hour)
+	if errorNotNil(err, w) {
+		return
+	}
+
+	refreshToken, err := auth.MakeRefreshToken()
+	if errorNotNil(err, w) {
 		return
 	}
 
 	type User struct {
-		ID        uuid.UUID `json:"id"`
-		CreatedAt time.Time `json:"created_at"`
-		UpdatedAt time.Time `json:"updated_at"`
-		Email     string    `json:"email"`
-		Token     string    `json:"token"`
+		ID           uuid.UUID `json:"id"`
+		CreatedAt    time.Time `json:"created_at"`
+		UpdatedAt    time.Time `json:"updated_at"`
+		Email        string    `json:"email"`
+		Token        string    `json:"token"`
+		RefreshToken string    `json:"refresh_token"`
 	}
 
 	userLoginResponse := User{
-		ID:        searchedUser.ID,
-		CreatedAt: searchedUser.CreatedAt,
-		UpdatedAt: searchedUser.UpdatedAt,
-		Email:     searchedUser.Email,
-		Token:     token,
+		ID:           searchedUser.ID,
+		CreatedAt:    searchedUser.CreatedAt,
+		UpdatedAt:    searchedUser.UpdatedAt,
+		Email:        searchedUser.Email,
+		Token:        token,
+		RefreshToken: refreshToken,
 	}
+
+	// Log into refresh token into DB
+	refreshTokenParams := database.CreateRefreshTokenParams{
+		Token:     refreshToken,
+		UserID:    searchedUser.ID,
+		ExpiresAt: time.Now().Add(60 * 24 * time.Hour),
+	}
+	cfg.dbQueries.CreateRefreshToken(r.Context(), refreshTokenParams)
+
 	respondWithJSON(w, 200, userLoginResponse)
+
+}
+
+func (cfg *apiConfig) refresh(w http.ResponseWriter, r *http.Request) {
+
+	authToken, err := auth.GetBearerToken(r.Header)
+	if errorNotNil(err, w) {
+		return
+	}
+
+	refreshToken, err := cfg.dbQueries.GetRefreshToken(r.Context(), authToken)
+	if err != nil {
+		respondWithError(w, 401, struct {
+			Error string `json:"error"`
+		}{Error: "Invalid token"})
+		return
+	}
+
+	if time.Now().Compare(refreshToken.ExpiresAt) > 0 || refreshToken.RevokedAt.Valid {
+		respondWithError(w, 401, struct {
+			Error string `json:"error"`
+		}{Error: "Expired token"})
+		return
+	}
+
+	// Good to create the access token!
+	accessToken, err := auth.MakeJWT(refreshToken.UserID, cfg.jwtSecret, time.Hour)
+	if errorNotNil(err, w) {
+		return
+	}
+
+	respondWithJSON(w, 200, struct {
+		Token string `json:"token"`
+	}{Token: accessToken})
+
+}
+
+func (cfg *apiConfig) revoke(w http.ResponseWriter, r *http.Request) {
+
+	authToken, err := auth.GetBearerToken(r.Header)
+	if errorNotNil(err, w) {
+		return
+	}
+
+	err = cfg.dbQueries.RevokeRefreshToken(r.Context(), authToken)
+	if err != nil {
+		respondWithError(w, 404, struct {
+			Error string `json:"error"`
+		}{Error: "Auth token not found"})
+	}
+
+	w.WriteHeader(204)
 
 }
 
@@ -361,7 +429,7 @@ func decodeJSON[T any](r *http.Request) (T, error) {
 	return result, err
 }
 
-func somethingWentWrongCheck(err error, w http.ResponseWriter) bool {
+func errorNotNil(err error, w http.ResponseWriter) bool {
 	if err != nil {
 		respondWithError(w, 500, error.Error(err))
 		return true
