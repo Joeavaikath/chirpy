@@ -99,7 +99,7 @@ func (cfg *apiConfig) printMetric(w http.ResponseWriter, r *http.Request) {
 func (cfg *apiConfig) resetMetric(w http.ResponseWriter, r *http.Request) {
 	cfg.fileserverHits.Store(0)
 	if os.Getenv("PLATFORM") != "dev" {
-		invalid := invalidChirp{}
+		invalid := responseError{}
 		respondWithError(w, 403, invalid)
 		return
 	}
@@ -113,7 +113,7 @@ type responseMessage struct {
 	Message string `json:"message"`
 }
 
-type invalidChirp struct {
+type responseError struct {
 	Error string `json:"error"`
 }
 
@@ -218,7 +218,7 @@ func (cfg *apiConfig) addChirp(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 
 	if len(params.Body) > 140 {
-		respondWithError(w, 400, invalidChirp{
+		respondWithError(w, 400, responseError{
 			Error: "Chirp is too long",
 		})
 		return
@@ -253,10 +253,47 @@ func (cfg *apiConfig) addChirp(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) getAllChirps(w http.ResponseWriter, r *http.Request) {
-	chirps, err := cfg.dbQueries.GetAllChirps(r.Context())
-	if errorNotNil(err, w) {
+
+	author := r.URL.Query().Get("author_id")
+	sort := r.URL.Query().Get("sort")
+
+	var chirps []database.Chirp
+	var err error
+
+	if author == "" {
+		if sort == "desc" {
+			chirps, err = cfg.dbQueries.GetAllChirpsDesc(r.Context())
+		} else {
+			chirps, err = cfg.dbQueries.GetAllChirpsAsc(r.Context())
+		}
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	} else {
+		author_uuid, err := uuid.Parse(author)
+		if err != nil {
+			respondWithError(w, http.StatusUnauthorized, err.Error())
+			return
+		}
+
+		if sort == "desc" {
+			chirps, err = cfg.dbQueries.GetChirpsByUserIdDesc(r.Context(), author_uuid)
+		} else {
+			chirps, err = cfg.dbQueries.GetChirpsByUserIdAsc(r.Context(), author_uuid)
+		}
+
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, err.Error())
 		return
 	}
+
 	responseChirps := []Chirp{}
 	for _, chirp := range chirps {
 		chirpResponse := Chirp{
