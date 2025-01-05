@@ -61,6 +61,8 @@ func main() {
 	serveMux.Handle("POST /api/refresh", http.HandlerFunc(apiConfig.refresh))
 	serveMux.Handle("POST /api/revoke", http.HandlerFunc(apiConfig.revoke))
 
+	serveMux.Handle("PUT /api/users", http.HandlerFunc(apiConfig.updateUser))
+
 	server := http.Server{
 		Addr:    ":8080",
 		Handler: serveMux,
@@ -198,13 +200,6 @@ func (cfg *apiConfig) addChirp(w http.ResponseWriter, r *http.Request) {
 		respondWithError(w, 401, struct {
 			Error string `json:"error"`
 		}{Error: err.Error()})
-		return
-	}
-
-	if userID == uuid.Nil {
-		respondWithError(w, 401, struct {
-			Error string `json:"error"`
-		}{Error: "Unauthorized"})
 		return
 	}
 
@@ -406,6 +401,74 @@ func (cfg *apiConfig) revoke(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(204)
+
+}
+
+func (cfg *apiConfig) updateUser(w http.ResponseWriter, r *http.Request) {
+	accessToken, err := auth.GetBearerToken(r.Header)
+
+	if accessToken == "" {
+		respondWithError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+
+	if errorNotNil(err, w) {
+		return
+	}
+
+	userID, err := auth.ValidateJWT(accessToken, cfg.jwtSecret)
+	if err != nil {
+		respondWithError(w, 401, struct {
+			Error string `json:"error"`
+		}{Error: "Invalid access token"})
+		return
+	}
+
+	type updateParams struct {
+		Password string `json:"password"`
+		Email    string `json:"email"`
+	}
+
+	params, err := decodeJSON[updateParams](r)
+	if errorNotNil(err, w) {
+		return
+	}
+
+	hashedPass, err := auth.HashPassword(params.Password)
+	if errorNotNil(err, w) {
+		return
+	}
+
+	dbParams := database.UpdateEmailandPasswordParams{
+		HashedPassword: hashedPass,
+		Email:          params.Email,
+		ID:             userID,
+	}
+	err = cfg.dbQueries.UpdateEmailandPassword(r.Context(), dbParams)
+	if errorNotNil(err, w) {
+		return
+	}
+
+	user, err := cfg.dbQueries.GetUserByEmail(r.Context(), dbParams.Email)
+	if errorNotNil(err, w) {
+		return
+	}
+
+	type User struct {
+		ID        uuid.UUID `json:"id"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+		Email     string    `json:"email"`
+	}
+
+	userResponse := User{
+		ID:        user.ID,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+		Email:     user.Email,
+	}
+
+	respondWithJSON(w, 200, userResponse)
 
 }
 
