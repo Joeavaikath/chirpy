@@ -21,6 +21,7 @@ type apiConfig struct {
 	fileserverHits atomic.Int32
 	dbQueries      *database.Queries
 	jwtSecret      string
+	polkaKey       string
 }
 
 func main() {
@@ -29,6 +30,7 @@ func main() {
 
 	dbURL := os.Getenv("DB_URL")
 	jwtSecret := os.Getenv("SECRET")
+	polkaKey := os.Getenv("POLKA_API_KEY")
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
 		os.Exit(1)
@@ -41,6 +43,7 @@ func main() {
 	apiConfig := &apiConfig{
 		dbQueries: dbQueries,
 		jwtSecret: jwtSecret,
+		polkaKey:  polkaKey,
 	}
 
 	serveMux.Handle("/app/", apiConfig.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(".")))))
@@ -60,6 +63,7 @@ func main() {
 	serveMux.Handle("POST /api/login", http.HandlerFunc(apiConfig.login))
 	serveMux.Handle("POST /api/refresh", http.HandlerFunc(apiConfig.refresh))
 	serveMux.Handle("POST /api/revoke", http.HandlerFunc(apiConfig.revoke))
+	serveMux.Handle("POST /api/polka/webhooks", http.HandlerFunc(apiConfig.handleEvent))
 
 	serveMux.Handle("PUT /api/users", http.HandlerFunc(apiConfig.updateUser))
 
@@ -103,6 +107,10 @@ func (cfg *apiConfig) resetMetric(w http.ResponseWriter, r *http.Request) {
 	if errorNotNil(err, w) {
 		return
 	}
+}
+
+type responseMessage struct {
+	Message string `json:"message"`
 }
 
 type invalidChirp struct {
@@ -169,17 +177,19 @@ func (cfg *apiConfig) addUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type User struct {
-		ID        uuid.UUID `json:"id"`
-		CreatedAt time.Time `json:"created_at"`
-		UpdatedAt time.Time `json:"updated_at"`
-		Email     string    `json:"email"`
+		ID          uuid.UUID `json:"id"`
+		CreatedAt   time.Time `json:"created_at"`
+		UpdatedAt   time.Time `json:"updated_at"`
+		Email       string    `json:"email"`
+		IsChirpyRed bool      `json:"is_chirpy_red"`
 	}
 
 	userCreatedResponse := User{
-		ID:        user.ID,
-		CreatedAt: user.CreatedAt,
-		UpdatedAt: user.UpdatedAt,
-		Email:     params.Email,
+		ID:          user.ID,
+		CreatedAt:   user.CreatedAt,
+		UpdatedAt:   user.UpdatedAt,
+		Email:       params.Email,
+		IsChirpyRed: user.IsChirpyRed,
 	}
 
 	respondWithJSON(w, 201, userCreatedResponse)
@@ -331,6 +341,7 @@ func (cfg *apiConfig) login(w http.ResponseWriter, r *http.Request) {
 		Email        string    `json:"email"`
 		Token        string    `json:"token"`
 		RefreshToken string    `json:"refresh_token"`
+		IsChirpyRed  bool      `json:"is_chirpy_red"`
 	}
 
 	userLoginResponse := User{
@@ -340,6 +351,7 @@ func (cfg *apiConfig) login(w http.ResponseWriter, r *http.Request) {
 		Email:        searchedUser.Email,
 		Token:        token,
 		RefreshToken: refreshToken,
+		IsChirpyRed:  searchedUser.IsChirpyRed,
 	}
 
 	// Log into refresh token into DB
@@ -455,17 +467,19 @@ func (cfg *apiConfig) updateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type User struct {
-		ID        uuid.UUID `json:"id"`
-		CreatedAt time.Time `json:"created_at"`
-		UpdatedAt time.Time `json:"updated_at"`
-		Email     string    `json:"email"`
+		ID          uuid.UUID `json:"id"`
+		CreatedAt   time.Time `json:"created_at"`
+		UpdatedAt   time.Time `json:"updated_at"`
+		Email       string    `json:"email"`
+		IsChirpyRed bool      `json:"is_chirpy_red"`
 	}
 
 	userResponse := User{
-		ID:        user.ID,
-		CreatedAt: user.CreatedAt,
-		UpdatedAt: user.UpdatedAt,
-		Email:     user.Email,
+		ID:          user.ID,
+		CreatedAt:   user.CreatedAt,
+		UpdatedAt:   user.UpdatedAt,
+		Email:       user.Email,
+		IsChirpyRed: user.IsChirpyRed,
 	}
 
 	respondWithJSON(w, 200, userResponse)
@@ -473,6 +487,7 @@ func (cfg *apiConfig) updateUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) deleteChirp(w http.ResponseWriter, r *http.Request) {
+
 	chirpID := r.PathValue("chirpID")
 	chirpUUID, err := uuid.Parse(chirpID)
 	if errorNotNil(err, w) {
@@ -519,6 +534,57 @@ func (cfg *apiConfig) deleteChirp(w http.ResponseWriter, r *http.Request) {
 		Error string `json:"error"`
 	}{Error: "delete successful"})
 
+}
+
+func (cfg *apiConfig) handleEvent(w http.ResponseWriter, r *http.Request) {
+	type webHookEvent struct {
+		Data struct {
+			UserID string `json:"user_id"`
+		} `json:"data"`
+		Event string `json:"event"`
+	}
+
+	apiKey, err := auth.GetAPIKey(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+
+	if apiKey != cfg.polkaKey {
+		respondWithError(w, http.StatusUnauthorized, responseMessage{
+			Message: "invalid key",
+		})
+		return
+	}
+
+	params, err := decodeJSON[webHookEvent](r)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if params.Event == "user.upgraded" {
+
+		user_uuid, err := uuid.Parse(params.Data.UserID)
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+
+		err = cfg.dbQueries.GrantChirpyRed(r.Context(), user_uuid)
+		if err != nil {
+			respondWithError(w, http.StatusNotFound, err.Error())
+			return
+		}
+
+		respondWithJSON(w, http.StatusNoContent, responseMessage{
+			Message: "user upgraded",
+		})
+	}
+
+	respondWithError(w, http.StatusNoContent, responseMessage{
+		Message: "unknown event",
+	})
 }
 
 func replaceProfane(message string, profaneList []string) string {
