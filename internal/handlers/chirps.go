@@ -12,7 +12,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func RegisterChirpRoutes(s *http.ServeMux, apiConfig *ApiConfig) {
+func ChirpRoutes(s *http.ServeMux, apiConfig *ApiConfig) {
 	s.Handle("GET /api/chirps", http.HandlerFunc(apiConfig.getAllChirps))
 	s.Handle("GET /api/chirps/{chirpID}", http.HandlerFunc(apiConfig.getChirp))
 	s.Handle("POST /api/chirps", http.HandlerFunc(apiConfig.addChirp))

@@ -10,7 +10,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func RegisterUserRoutes(s *http.ServeMux, apiConfig *ApiConfig) {
+func UserRoutes(s *http.ServeMux, apiConfig *ApiConfig) {
 	s.Handle("POST /api/users", http.HandlerFunc(apiConfig.addUser))
 	s.Handle("PUT /api/users", http.HandlerFunc(apiConfig.updateUser))
 }

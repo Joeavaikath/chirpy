@@ -7,7 +7,7 @@ import (
 	"text/template"
 )
 
-func RegisterAdminRoutes(s *http.ServeMux, apiConfig *ApiConfig) {
+func AdminRoutes(s *http.ServeMux, apiConfig *ApiConfig) {
 	s.Handle("GET /admin/metrics", http.HandlerFunc(apiConfig.printMetric))
 	s.Handle("POST /admin/reset", http.HandlerFunc(apiConfig.resetMetric))
 }

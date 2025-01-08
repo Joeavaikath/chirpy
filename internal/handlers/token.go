@@ -10,7 +10,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func RegisterTokenRoutes(s *http.ServeMux, apiConfig *ApiConfig) {
+func TokenRoutes(s *http.ServeMux, apiConfig *ApiConfig) {
 	s.Handle("POST /api/login", http.HandlerFunc(apiConfig.login))
 	s.Handle("POST /api/refresh", http.HandlerFunc(apiConfig.refresh))
 	s.Handle("POST /api/revoke", http.HandlerFunc(apiConfig.revoke))

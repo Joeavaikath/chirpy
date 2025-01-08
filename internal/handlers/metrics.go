@@ -2,7 +2,7 @@ package handlers
 
 import "net/http"
 
-func RegisterMetricsRoutes(s *http.ServeMux, apiConfig *ApiConfig) {
+func MetricsRoutes(s *http.ServeMux, apiConfig *ApiConfig) {
 	s.Handle("/app/", apiConfig.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(".")))))
 
 	s.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, r *http.Request) {

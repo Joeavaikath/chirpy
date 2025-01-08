@@ -8,7 +8,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func RegisterWebhookRoutes(s *http.ServeMux, apiConfig *ApiConfig) {
+func WebhookRoutes(s *http.ServeMux, apiConfig *ApiConfig) {
 	s.Handle("POST /api/polka/webhooks", http.HandlerFunc(apiConfig.handleEvent))
 
 }
