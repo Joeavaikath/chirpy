@@ -32,7 +32,7 @@ func StartApp(address string) {
 		PolkaKey:  os.Getenv("POLKA_API_KEY"),
 	}
 
-	handlers.RegisterHandlers(serveMux, apiConfig)
+	RegisterHandlers(serveMux, apiConfig)
 
 	server := http.Server{
 		Addr:    address,
