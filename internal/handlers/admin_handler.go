@@ -1,7 +1,7 @@
 package handlers
 
 import (
-	"chirpy/internal/util"
+	"chirpy/util"
 	"net/http"
 	"os"
 	"text/template"

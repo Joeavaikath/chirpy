@@ -2,7 +2,7 @@ package handlers
 
 import (
 	"chirpy/internal/auth"
-	"chirpy/internal/util"
+	"chirpy/util"
 	"net/http"
 
 	"github.com/google/uuid"

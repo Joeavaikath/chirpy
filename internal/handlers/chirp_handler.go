@@ -3,7 +3,7 @@ package handlers
 import (
 	"chirpy/internal/auth"
 	"chirpy/internal/database"
-	"chirpy/internal/util"
+	"chirpy/util"
 	"database/sql"
 	"net/http"
 	"strings"
